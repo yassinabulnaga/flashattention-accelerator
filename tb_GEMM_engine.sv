@@ -1,0 +1,144 @@
+// ============================================================================
+// tb_gemm_engine.sv — Simple testbench for gemm_engine
+// ============================================================================
+// Tests:
+//   1. All ones × all ones → expect 16 (in Q16.16 = 16 * 256 * 256 = 0x00100000... 
+//      actually Q8.8 × Q8.8: 1.0 = 0x0100, so 0x0100 * 0x0100 = 0x00010000 per lane,
+//      sum of 16 = 0x00100000 = 16.0 in Q16.16)
+//   2. Identity-like: a = {1,2,3,...,16}, b = {1,0,0,...,0} → expect a[0] = 1.0
+//   3. Count latency: how many cycles from in_valid to out_valid
+// ============================================================================
+
+`timescale 1ns / 1ps
+
+module tb_gemm_engine;
+
+    logic        clk, rst_n;
+    logic        in_valid;
+    logic signed [15:0] row_buf_a [16];
+    logic signed [15:0] b_row     [16];
+    logic        out_valid;
+    logic signed [31:0] out_data;
+
+    gemm_engine dut (.*);
+
+    // Clock: 10ns period
+    initial clk = 0;
+    always #5 clk = ~clk;
+
+    // Track cycle count
+    int cycle;
+    always_ff @(posedge clk) begin
+        if (!rst_n) cycle <= 0;
+        else        cycle <= cycle + 1;
+    end
+
+    // Monitor outputs
+    always_ff @(posedge clk) begin
+        if (out_valid)
+            $display("cycle %0d: out_valid=1  out_data=0x%08h (%0d decimal, Q16.16=%.4f)",
+                     cycle, out_data, out_data, real'(out_data) / 65536.0);
+    end
+
+    // Helper: set all elements of an array to a value
+    task automatic set_row(ref logic signed [15:0] arr [16], input logic signed [15:0] val);
+        for (int i = 0; i < 16; i++) arr[i] = val;
+    endtask
+
+    task automatic clear_row(ref logic signed [15:0] arr [16]);
+        for (int i = 0; i < 16; i++) arr[i] = 16'sd0;
+    endtask
+
+    initial begin
+        // ── Reset ──
+        rst_n    = 0;
+        in_valid = 0;
+        clear_row(row_buf_a);
+        clear_row(b_row);
+        repeat (3) @(posedge clk);
+        rst_n = 1;
+        @(posedge clk);
+
+        // ── Test 1: all 1.0 × all 1.0 ──
+        // 1.0 in Q8.8 = 0x0100 = 256
+        // Expected: 16 × (1.0 × 1.0) = 16.0 in Q16.16 = 16 × 65536 = 1048576 = 0x00100000
+        $display("\n=== Test 1: all 1.0 × all 1.0, expect 16.0 ===");
+        set_row(row_buf_a, 16'sh0100);
+        set_row(b_row,     16'sh0100);
+        in_valid = 1;
+        $display("cycle %0d: in_valid asserted", cycle);
+        @(posedge clk);
+        in_valid = 0;
+        clear_row(b_row);
+
+        // Wait for result
+        repeat (10) @(posedge clk);
+
+        // ── Test 2: a = {0.5, 0.5, ...}, b = {2.0, 2.0, ...} ──
+        // 0.5 in Q8.8 = 0x0080 = 128
+        // 2.0 in Q8.8 = 0x0200 = 512
+        // Expected: 16 × (0.5 × 2.0) = 16.0
+        $display("\n=== Test 2: all 0.5 × all 2.0, expect 16.0 ===");
+        set_row(row_buf_a, 16'sh0080);
+        set_row(b_row,     16'sh0200);
+        in_valid = 1;
+        $display("cycle %0d: in_valid asserted", cycle);
+        @(posedge clk);
+        in_valid = 0;
+        clear_row(b_row);
+
+        repeat (10) @(posedge clk);
+
+        // ── Test 3: a = {1,2,3,...,16} × b = all 1.0 ──
+        // Expected: (1+2+3+...+16) = 136.0 in Q16.16
+        $display("\n=== Test 3: a={1..16} × b=all 1.0, expect 136.0 ===");
+        for (int i = 0; i < 16; i++)
+            row_buf_a[i] = (i + 1) <<< 8;  // (i+1).0 in Q8.8
+        set_row(b_row, 16'sh0100);
+        in_valid = 1;
+        $display("cycle %0d: in_valid asserted", cycle);
+        @(posedge clk);
+        in_valid = 0;
+        clear_row(b_row);
+
+        repeat (10) @(posedge clk);
+
+        // ── Test 4: negative × positive ──
+        // a = all -1.0 (0xFF00), b = all 1.0 (0x0100)
+        // Expected: 16 × (-1.0 × 1.0) = -16.0 = 0xFFF00000 in signed Q16.16
+        $display("\n=== Test 4: all -1.0 × all 1.0, expect -16.0 ===");
+        set_row(row_buf_a, -16'sh0100);
+        set_row(b_row,      16'sh0100);
+        in_valid = 1;
+        $display("cycle %0d: in_valid asserted", cycle);
+        @(posedge clk);
+        in_valid = 0;
+        clear_row(b_row);
+
+        repeat (10) @(posedge clk);
+
+        // ── Test 5: back-to-back valid ──
+        // Two consecutive dot products to verify pipeline throughput
+        $display("\n=== Test 5: back-to-back, expect 16.0 then 4.0 ===");
+        // Beat 1: all 1.0 × all 1.0 → 16.0
+        set_row(row_buf_a, 16'sh0100);
+        set_row(b_row,     16'sh0100);
+        in_valid = 1;
+        $display("cycle %0d: in_valid beat 1", cycle);
+        @(posedge clk);
+        // Beat 2: all 0.5 × all 0.5 → 16 × 0.25 = 4.0
+        set_row(b_row, 16'sh0080);
+        set_row(row_buf_a, 16'sh0080);
+        $display("cycle %0d: in_valid beat 2", cycle);
+        @(posedge clk);
+        in_valid = 0;
+        clear_row(b_row);
+        clear_row(row_buf_a);
+
+        repeat (10) @(posedge clk);
+
+        $display("\n=== Done ===");
+        $finish;
+    end
+
+endmodule
