@@ -63,15 +63,15 @@ module softmax_online #(
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             for (k = 0; k < BR; k++) begin
-                m_reg[k]   <= -16'sd32768;
+                m_reg[k]   <= -16'sd32768; //most negative value possible
                 ell_reg[k] <= 32'd0;
             end
-        end else if (init_tile) begin
+        end else if (init_tile) begin //if new tile basically reset
             for (k = 0; k < BR; k++) begin
                 m_reg[k]   <= -16'sd32768;
                 ell_reg[k] <= 32'd0;
             end
-        end else if (fsm_commit) begin
+        end else if (fsm_commit) begin //when fsm says row done
             m_reg[row_idx_lat]   <= m_new;
             ell_reg[row_idx_lat] <= ell_new;
         end
