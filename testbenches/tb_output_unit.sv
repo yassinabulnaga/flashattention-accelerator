@@ -32,14 +32,9 @@ module tb_output_unit;
     // Simulated BRAM (Oi row)
     logic signed [31:0] oi_bram [D];
 
-    // BRAM read model: combinational read at bram_addr
+    // BRAM model: single-driver from initial block below
+    // Writes happen via bram_write_tick task; reads are combinational
     assign bram_rdata = oi_bram[bram_addr];
-
-    // BRAM write model: capture on clock when bram_we
-    always_ff @(posedge clk) begin
-        if (bram_we)
-            oi_bram[bram_addr] <= bram_wdata;
-    end
 
     // DUT
     output_unit #(.D(D)) u_dut (
@@ -91,6 +86,26 @@ module tb_output_unit;
         q8_to_real = real'(val) / 256.0;
     endfunction
 
+    // BRAM write model — sole driver of oi_bram
+    always @(posedge clk) begin
+        if (bram_we)
+            oi_bram[bram_addr] <= bram_wdata;
+    end
+
+    // Helper: load BRAM with a uniform value
+    task automatic bram_fill(input logic signed [31:0] val);
+        @(negedge clk);  // avoid racing with posedge write model
+        for (int i = 0; i < D; i++)
+            oi_bram[i] = val;
+    endtask
+
+    // Helper: load BRAM with ramp pattern (k+1).0
+    task automatic bram_fill_ramp();
+        @(negedge clk);
+        for (int i = 0; i < D; i++)
+            oi_bram[i] = (i + 1) <<< 16;
+    endtask
+
     initial begin
         // ============================================================
         // Reset
@@ -102,7 +117,7 @@ module tb_output_unit;
         gemm_idx  = 4'd0;
         recip_ell = 16'd0;
 
-        // Initialize BRAM with known pattern: oi_bram[k] = (k+1) << 16 = (k+1).0 in Q16.16
+        // Initialize BRAM with known pattern: oi_bram[k] = (k+1).0 in Q16.16
         for (int i = 0; i < D; i++)
             oi_bram[i] = (i + 1) <<< 16;  // 1.0, 2.0, ..., 16.0
 
@@ -186,8 +201,7 @@ module tb_output_unit;
         $display("\n=== Test 4: NORMALIZE ===");
 
         // Reload BRAM with uniform 8.0
-        for (int i = 0; i < D; i++)
-            oi_bram[i] = 32'sh0008_0000;  // 8.0 in Q16.16
+        bram_fill(32'sh0008_0000);
 
         // Load into o_row
         cmd_load = 1;
@@ -225,8 +239,7 @@ module tb_output_unit;
         $display("\n=== Test 5: Full sequence (load→rescale→acc→norm→store) ===");
 
         // Setup BRAM = 4.0 everywhere
-        for (int i = 0; i < D; i++)
-            oi_bram[i] = 32'sh0004_0000;
+        bram_fill(32'sh0004_0000);
 
         // Load
         cmd_load = 1;
